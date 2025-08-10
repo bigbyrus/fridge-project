@@ -17,7 +17,7 @@ This project implements a **smart fridge** system that uses facial recognition a
 
 **Hardware:**
 - **Raspberry Pi** – runs the main Python application, Flask server, and face recognition program.
-- **ESP32 Camera (OV2640 module)** – captures images and sends them to Raspberry Pi through serial communication.
+- **ESP32 Camera (OV2640 module)** – captures images and sends them to Raspberry Pi over serial.
 - **External pushbutton** – physical trigger to take a picture.
 
 **Software Stack:**
