@@ -1,14 +1,13 @@
 # Smart Fridge Face & Item Recognition System
 
-This project implements a **smart fridge** system that uses facial recognition and image capture to identify users, and keep track of their groceries. It integrates a Raspberry Pi, ESP32 camera module, DLIB face recognition, OpenCV image processing, and a Flask web server.
+This project implements a **smart fridge** system that uses facial recognition and image capture to identify users, and keep track of their groceries. It integrates a Raspberry Pi, ESP32 camera module, DLIB facial recognition, OpenCV image processing, and a Flask web server.
 
 ## Features
 
-- **Face recognition** using DLIB
-- **ESP32 camera** via serial communication
+- **Facial recognition** using DLIB
+- **ESP32 camera** captures photos and sends to RaspberryPi
 - **Flask web server** for user interface and image serving
 - **Automated image capture** triggered over serial (`"Take_Photo"` command)
-- **Threaded serial listener** for non-blocking trigger detection
 - **User-specific image storage** with timestamped file names
 
 ---
@@ -16,7 +15,7 @@ This project implements a **smart fridge** system that uses facial recognition a
 ## System Overview
 
 **Hardware:**
-- **Raspberry Pi** – runs the main Python application, Flask server, and face recognition program
+- **Raspberry Pi** – runs the main Python application, Flask server, and facial recognition program
 - **ESP32 Camera (OV2640 module)** – captures images and sends them to Raspberry Pi over serial
 - **External pushbutton** – physical trigger to take a picture
 
@@ -34,7 +33,7 @@ This project implements a **smart fridge** system that uses facial recognition a
 ## Boot Process
 
 1. **ESP32 connection** – Raspberry Pi connects to ESP32 over serial
-2. **Initialize known faces** – Load LeBron image as a dummy known user; compute and store its 128-dimension face embedding
+2. **Initialize known faces** – Load LeBron image as a dummy known user, compute and store its 128-dimension face embedding
 3. **Start Flask server** – Serves web UI
 4. **Start background serial listener** – Thread listens for `"Take_Photo"` trigger and calls `capture()` when received
 
@@ -46,13 +45,6 @@ This project implements a **smart fridge** system that uses facial recognition a
 - Scans a directory for images containing faces
 - Uses DLIB to detect face locations and generate embeddings
 - Adds new encodings to `known_face_encodings` and usernames to `known_face_names`
-
-### `listen_for_trigger()`
-- Monitors serial port for incoming `"Take_Photo"` command
-- If triggered, calls `capture()`
-
-### `start_listener()`
-- Runs `listen_for_trigger()` in a background daemon thread to avoid blocking the main application
 
 ---
 
