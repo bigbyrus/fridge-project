@@ -16,20 +16,12 @@ import re
 from urllib.parse import urlparse
 
 
-### GLOBAL VARIABLES 
-app = Flask(__name__)
-lastCaptureTime = 0
-captureInterval = 5
-face_locations = []
-face_encodings = []
-face_names = []
-connected = False
-
-user_directory = os.path.join(os.getcwd(), "static", "user_faces")
-
-## Scaling necessary for face_recognition, depends on esp vs webcam
+# scaling necessary for face_recognition, depends on esp vs webcam
 scale_up = 4
 scale_down = .25
+connected = False
+
+# attempt to connect to PCB
 try:
     ser = serial.Serial('COM8', 115200, timeout=100)
     scale_up = 2
@@ -38,11 +30,28 @@ try:
 except serial.SerialException as e:
     print("Please check the port and try again.")
 
+# instantiate Flask
+app = Flask(__name__)
+
+
+# initialize system before running dev server
 def sys_init():
     global known_users
     global known_face_encodings
     global honey_path
     global honey_image
+    global lastCaptureTime
+    global face_locations
+    global face_encodings
+    global face_names
+    global user_directory
+
+    user_directory = os.path.join(os.getcwd(), "static", "user_faces")
+
+    lastCaptureTime = 0
+    face_locations = []
+    face_encodings = []
+    face_names = []
 
     honey_path = os.path.join(os.getcwd(), "util-images", "tryAgain.jpg")
     honey_image = face_recognition.load_image_file(honey_path)
@@ -53,12 +62,15 @@ def sys_init():
     known_users = ["LBJ"]
     known_face_encodings = np.array([lebron_face_encoding])
 
+
+# add each folder within a directory into an ARRAY
 def get_folders(directory):
     folders = []
     for item in os.listdir(directory):
         if os.path.isdir(os.path.join(directory, item)):
             folders.append(item)
     return folders
+
 
 # Scans user_faces and reloads known_faces after reboot
 def load_faces_and_encodings(directory):
@@ -80,6 +92,7 @@ def load_faces_and_encodings(directory):
             else:
                 print(f"No faces found in image: {file_name}")
 
+
 # CHANGE THIS
 def listen_for_trigger():
     global ser
@@ -94,10 +107,12 @@ def listen_for_trigger():
             pass
         time.sleep(0.1)  # Adjust the sleep time as needed
 
+
 def start_listener():
     global listener_thread
     listener_thread = threading.Thread(target=listen_for_trigger, daemon=True)
     listener_thread.start()
+
 
 def read_image_from_serial(ser):
     ser.write(b'TRIGGER')
@@ -117,8 +132,10 @@ def read_image_from_serial(ser):
     img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
     return img
 
+
 def get_RGB(image):
     return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
 
 def reformat_image(image):
     pil_image = Image.fromarray(image)
@@ -128,6 +145,7 @@ def reformat_image(image):
     img_base64 = base64.b64encode(img_str).decode('utf-8')
     return img_base64 
 
+
 def extract_prefix_before_number(url):
     path = urlparse(url).path
     image_name = path.split('/')[-1]
@@ -136,6 +154,7 @@ def extract_prefix_before_number(url):
         return match.group()
     else:
         return ""
+
 
 def take_photo():
     global honey_image
@@ -160,6 +179,7 @@ def take_photo():
         scale_down = .25
         print("Please check the port and try again.(212)")
     return image
+
 
 def recognize_n_save(image):
     small_image = cv2.resize(image, (0, 0), fx=scale_down, fy=scale_down)
@@ -196,18 +216,22 @@ def recognize_n_save(image):
         cv2.putText(image, name, (left + 6, bottom - 6), font, 1.0, (255, 255, 255), 1)
     return image  
 
+
 @app.route('/')
 def index(): 
     return render_template('index.html')
+
 
 @app.route('/users')
 def users():
     folders = get_folders(user_directory)
     return render_template('userPage.html', folders=folders)
 
+
 @app.route('/newUser')
 def newUser():
     return render_template('newUserPage.html')
+
 
 @app.route('/folder/<folder_name>')
 def folder(folder_name):
@@ -226,6 +250,7 @@ def folder(folder_name):
 
     return render_template('folder.html', folder_name=folder_name, image_data=image_data)
 
+
 @app.route('/delete', methods=['POST'])
 def delete_image():
     data = request.get_json()
@@ -237,6 +262,7 @@ def delete_image():
         return jsonify({'status': 'success'}), 200
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
 
 @app.route('/submit', methods=['POST'])
 def submit():
@@ -261,6 +287,7 @@ def submit():
     else:
         return f"Directory for username {username} already exists"
 
+
 @app.route('/capture', methods=['POST'])
 def capture(): ## Triggered by physical and virtual button push
     image = take_photo() ## Get image from XIAO S3 Sense
@@ -269,6 +296,7 @@ def capture(): ## Triggered by physical and virtual button push
     img_base64 = reformat_image(recognized_image) ## Convert to JPG, return as as bitstream
     return {'text': '', 'image': img_base64}
 
+
 @app.route('/captureNewUser', methods=['POST'])
 def newUserCapture(): ## Triggered by virtual button push
     image = take_photo() ## Get image from XIAO S3 Sense
@@ -276,6 +304,10 @@ def newUserCapture(): ## Triggered by virtual button push
     img_base64 = reformat_image(image) ## Convert to JPG, return as bitstream
     return {'text': '', 'image': img_base64}
 
+
 if __name__ == '__main__':
+    sys_init()
     load_faces_and_encodings(user_directory)
+    if(connected):
+        start_listener()
     app.run(debug = True)
