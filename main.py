@@ -32,6 +32,7 @@ except serial.SerialException as e:
 
 # instantiate Flask
 app = Flask(__name__)
+serial_lock = threading.Lock()
 
 
 # initialize system before running dev server
@@ -93,18 +94,20 @@ def load_faces_and_encodings(directory):
                 print(f"No faces found in image: {file_name}")
 
 
-# the loop does not poll, since ser.readline() is a blocking read
+
 def listen_for_trigger():
     global ser
     while True:
         try:
-            # thread will block here (sleep until data arrives)
-            line = ser.readline().decode('utf-8').rstrip()
-            if line == "Take_Photo":
-                capture()
-                    
+            with serial_lock:
+                if ser.in_waiting > 0:
+                    line = ser.readline().decode('utf-8').rstrip()
+                    if line == "Take_Photo":
+                        capture()
         except Exception as e:
-            pass
+            print(f"Listener error: {e}")
+        
+        time.sleep(0.05)
 
 
 def start_listener():
@@ -114,22 +117,23 @@ def start_listener():
 
 
 def read_image_from_serial(ser):
-    ser.write(b'TRIGGER')
-    # Read the length of the image
-    img_len_bytes = ser.read(4)
-    img_len = int.from_bytes(img_len_bytes, 'little')
-    print(f"Image length: {img_len}")
+    with serial_lock:
+        ser.write(b'TRIGGER')
+        # Read the length of the image
+        img_len_bytes = ser.read(4)
+        img_len = int.from_bytes(img_len_bytes, 'little')
+        print(f"Image length: {img_len}")
 
-    # Read the image data
-    img_data = ser.read(img_len)
-    if len(img_data) != img_len:
-        print(f"Failed to read the full image. Read {len(img_data)} bytes.")
-        return None
+        # Read the image data
+        img_data = ser.read(img_len)
+        if len(img_data) != img_len:
+            print(f"Failed to read the full image. Read {len(img_data)} bytes.")
+            return None
 
-    # Decode the image
-    img_array = np.frombuffer(img_data, dtype=np.uint8)
-    img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-    return img
+        # Decode the image
+        img_array = np.frombuffer(img_data, dtype=np.uint8)
+        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        return img
 
 
 def get_RGB(image):
@@ -309,4 +313,4 @@ if __name__ == '__main__':
     load_faces_and_encodings(user_directory)
     if(connected):
         start_listener()
-    app.run(debug = True)
+    app.run(debug = True, use_reloader=False)
