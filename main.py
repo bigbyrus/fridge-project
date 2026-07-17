@@ -23,7 +23,7 @@ connected = False
 
 # attempt to connect to PCB
 try:
-    ser = serial.Serial('COM8', 115200, timeout=100)
+    ser = serial.Serial('/dev/tty.usbmodem14201', 115200, timeout=500)
     scale_up = 2
     scale_down = .5
     connected = True
@@ -93,19 +93,18 @@ def load_faces_and_encodings(directory):
                 print(f"No faces found in image: {file_name}")
 
 
-# CHANGE THIS
+# the loop does not poll, since ser.readline() is a blocking read
 def listen_for_trigger():
     global ser
     while True:
         try:
-            if ser.in_waiting > 0:
-                line = ser.readline().decode('utf-8').rstrip()
-                if line == "Take_Photo":
-                    capture()
+            # thread will block here (sleep until data arrives)
+            line = ser.readline().decode('utf-8').rstrip()
+            if line == "Take_Photo":
+                capture()
                     
         except Exception as e:
             pass
-        time.sleep(0.1)  # Adjust the sleep time as needed
 
 
 def start_listener():
