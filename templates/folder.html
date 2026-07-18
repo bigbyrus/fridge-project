@@ -65,10 +65,11 @@
 <body>
     <h1>Contents of folder: {{ folder_name }}</h1>
     <ul>
-        {% for image_url in image_urls %}
+        {% for image in image_data %}
             <li>
-                <img src="{{ image_url }}" alt="Image">
-                <p>{{ image_url[-25:-15] }}</p>
+                <img src="{{ image.url }}" alt="Image">
+                <p>{{ image.original_name }}</p>
+                <p>{{ image.added_string }}</p>
             </li>
         {% endfor %}
     </ul>

@@ -54,12 +54,23 @@
 
     <script>
         document.getElementById('capture-btn').addEventListener('click', async () => {
-            const response = await fetch('/capture', {
-                method: 'POST'
-            });
-            const data = await response.json();
-            document.getElementById('result').innerText = data.text;
-            document.getElementById('image-container').innerHTML = `<img src="data:image/jpeg;base64,${data.image}" alt="Captured Image">`;
+            try{
+                const response = await fetch('/capture', {
+                    method: 'POST'
+                });
+
+                if(!response.ok){
+                    throw new Error('Capture failed: ${response.status} ${response.statusText}');
+                }
+
+                const data = await response.json();
+
+                document.getElementById('result').innerText = data.text;
+                document.getElementById('image-container').innerHTML = `<img src="data:image/jpeg;base64,${data.image}" alt="Captured Image">`;
+            } catch(err){
+                console.error('Capture error: ', err);
+                document.getElementById('result').innerText = 'Something went wrong capturing the image';
+            }
         });
 
         document.addEventListener('DOMContentLoaded', function() {

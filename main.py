@@ -34,7 +34,6 @@ except serial.SerialException as e:
 app = Flask(__name__)
 serial_lock = threading.Lock()
 
-
 # initialize system before running dev server
 def sys_init():
     global known_users
@@ -119,8 +118,13 @@ def start_listener():
 def read_image_from_serial(ser):
     with serial_lock:
         ser.write(b'TRIGGER')
+
         # Read the length of the image
         img_len_bytes = ser.read(4)
+        if img_len_bytes != 4:
+            print("issue while reading Header Information over serial")
+            raise IOError
+        
         img_len = int.from_bytes(img_len_bytes, 'little')
         print(f"Image length: {img_len}")
 
@@ -128,7 +132,7 @@ def read_image_from_serial(ser):
         img_data = ser.read(img_len)
         if len(img_data) != img_len:
             print(f"Failed to read the full image. Read {len(img_data)} bytes.")
-            return None
+            raise IOError()
 
         # Decode the image
         img_array = np.frombuffer(img_data, dtype=np.uint8)
@@ -166,8 +170,13 @@ def take_photo():
     global scale_down
     currentTime = time.time()
     if currentTime - lastCaptureTime < 3:
-        honey_image = get_RGB(honey_image)
+        try:
+            honey_image = get_RGB(honey_image)
+        except Exception as e:
+            return jsonify({'status': 'error', 'message': str(e)}), 500
+
         return honey_image
+    
     lastCaptureTime = currentTime
     camera = cv2.VideoCapture(0)
     return_value, image = camera.read()
@@ -180,15 +189,14 @@ def take_photo():
     except Exception as e:
         scale_up = 4
         scale_down = .25
-        print("Please check the port and try again.(212)")
+        print("Image data over serial was corrupted")
     return image
 
 
 def recognize_n_save(image):
     small_image = cv2.resize(image, (0, 0), fx=scale_down, fy=scale_down)
-    rgb_small_image = cv2.cvtColor(small_image, cv2.COLOR_BGR2RGB)
-    face_locations = face_recognition.face_locations(rgb_small_image)
-    new_face_encodings = face_recognition.face_encodings(rgb_small_image, face_locations)
+    face_locations = face_recognition.face_locations(small_image)
+    new_face_encodings = face_recognition.face_encodings(small_image, face_locations)
     face_names = []
     for face_encoding in new_face_encodings:
         # See if the face is a match for the known face(s)
@@ -200,7 +208,7 @@ def recognize_n_save(image):
             name = known_users[best_match_index]
             now = datetime.now()
             pil_image = Image.fromarray(image)
-            target_dir = os.path.join(user_directory, name, now.strftime("%Y-%m-%d-%H-%M-%S") + ".jpg")
+            target_dir = os.path.join(user_directory, name, now.strftime("%Y-%m-%d-%H-%M") + ".jpg")
             pil_image.save(target_dir)
             face_names.append(name)
         else:
@@ -283,6 +291,7 @@ def submit():
         known_face_encodings = np.vstack([known_face_encodings, this_face_encoding[0]])
     else:
         return "No face found in the image", 400
+    
     newUser_path = os.path.join(user_directory, username)
     if not os.path.exists(newUser_path):
         os.makedirs(newUser_path)
@@ -294,7 +303,13 @@ def submit():
 @app.route('/capture', methods=['POST'])
 def capture(): ## Triggered by physical and virtual button push
     image = take_photo() ## Get image from XIAO S3 Sense
-    image = get_RGB(image) ## Convert to RGB
+
+    try:
+        image = get_RGB(image) ## Convert to RGB
+
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+    
     recognized_image = recognize_n_save(image) ## Match face and groceries, draw box, save to user
     img_base64 = reformat_image(recognized_image) ## Convert to JPG, return as as bitstream
     return {'text': '', 'image': img_base64}
