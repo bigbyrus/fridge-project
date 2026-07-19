@@ -53,6 +53,23 @@
     <div id="image-container"></div>
 
     <script>
+        const res = document.getElementById('result')
+        const imageContainer = document.getElementById('image-container')
+
+        function renderCapture(data){
+            res.innerText = data.text;
+            imageContainer.innerHTML = '<img src="data:image/jpeg;base64,${data.image}" alt="Captured Image">';
+        }
+
+        const captureStream = new EventSource('/stream');
+        captureStream.onmessage = (event) => {
+            renderCapture(JSON.parse(event.data));
+        };
+        captureStream.onerror = (err) => {
+            console.error('Capture stream error: ', err);
+        };
+
+
         document.getElementById('capture-btn').addEventListener('click', async () => {
             try{
                 const response = await fetch('/capture', {
@@ -62,14 +79,9 @@
                 if(!response.ok){
                     throw new Error('Capture failed: ${response.status} ${response.statusText}');
                 }
-
-                const data = await response.json();
-
-                document.getElementById('result').innerText = data.text;
-                document.getElementById('image-container').innerHTML = `<img src="data:image/jpeg;base64,${data.image}" alt="Captured Image">`;
             } catch(err){
                 console.error('Capture error: ', err);
-                document.getElementById('result').innerText = 'Something went wrong capturing the image';
+                res.innerText = 'Something went wrong capturing the image'
             }
         });
 

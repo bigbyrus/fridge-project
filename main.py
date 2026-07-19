@@ -1,5 +1,5 @@
 import cv2
-from flask import Flask, render_template, request, url_for, jsonify
+from flask import Flask, render_template, request, url_for, jsonify, Response
 from PIL import Image
 from io import BytesIO
 import numpy as np
@@ -14,7 +14,8 @@ import time
 import threading
 import re
 from urllib.parse import urlparse
-
+import json
+import queue
 
 # scaling necessary for face_recognition, depends on esp vs webcam
 scale_up = 4
@@ -33,6 +34,17 @@ except serial.SerialException as e:
 # instantiate Flask
 app = Flask(__name__)
 serial_lock = threading.Lock()
+
+
+capture_subscribers = []
+subscribers_lock = threading.Lock()
+
+def publish_capture_event(img_base64, text=''):
+    load = json.dumps({'text': text, 'image': img_base64})
+    with subscribers_lock():
+        subscribers = list(capture_subscribers)
+    for sub in subscribers:
+        sub.put(load)
 
 # initialize system before running dev server
 def sys_init():
@@ -98,17 +110,14 @@ def listen_for_trigger():
     global ser
     while True:
         try:
-            if ser.in_waiting > 0:
-                with serial_lock:
-                    line = ser.readline().decode('utf-8').rstrip()
-                if line == "Take_Photo":
-                    print("received message from PCB")
-                    serial_lock.release
-                    capture()
+            with serial_lock:
+                ser.timeout = 0.5
+                line = ser.readline().decode('utf-8').rstrip()
+            if line == "Take_Photo":
+                print("received image from the PCB")
+                perform_capture()
         except Exception as e:
             print(f"Listener error: {e}")
-        
-        time.sleep(0.05)
 
 
 def start_listener():
@@ -119,27 +128,31 @@ def start_listener():
 
 def read_image_from_serial(ser):
     with serial_lock:
-        ser.write(b'TRIGGER')
+        ser.timeout = 500
+        try:
+            ser.write(b'TRIGGER')
 
-        # Read the length of the image
-        img_len_bytes = ser.read(4)
-        if len(img_len_bytes) != 4:
-            print("issue while reading Header Information over serial")
-            raise IOError
-        
-        img_len = int.from_bytes(img_len_bytes, 'little')
-        print(f"Image length: {img_len}")
+            # Read the length of the image
+            img_len_bytes = ser.read(4)
+            if len(img_len_bytes) != 4:
+                print("issue while reading Header Information over serial")
+                raise IOError
+            
+            img_len = int.from_bytes(img_len_bytes, 'little')
+            print(f"Image length: {img_len}")
 
-        # Read the image data
-        img_data = ser.read(img_len)
-        if len(img_data) != img_len:
-            print(f"Failed to read the full image. Read {len(img_data)} bytes.")
-            raise IOError()
+            # Read the image data
+            img_data = ser.read(img_len)
+            if len(img_data) != img_len:
+                print(f"Failed to read the full image. Read {len(img_data)} bytes.")
+                raise IOError()
 
-        # Decode the image
-        img_array = np.frombuffer(img_data, dtype=np.uint8)
-        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-        return img
+            # Decode the image
+            img_array = np.frombuffer(img_data, dtype=np.uint8)
+            img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+            return img
+        finally:
+            ser.timeout = 0.5
 
 
 def get_RGB(image):
@@ -172,17 +185,13 @@ def take_photo():
     global scale_down
     currentTime = time.time()
     if currentTime - lastCaptureTime < 3:
-        try:
-            honey_image = get_RGB(honey_image)
-        except Exception as e:
-            return jsonify({'status': 'error', 'message': str(e)}), 500
-
+        honey_image = get_RGB(honey_image)
         return honey_image
     
     lastCaptureTime = currentTime
-    camera = cv2.VideoCapture(0)
-    return_value, image = camera.read()
-    camera.release()
+    #camera = cv2.VideoCapture(0)
+    #return_value, image = camera.read()
+    #camera.release()
     try:
         anImage = read_image_from_serial(ser)
         image = anImage
@@ -301,19 +310,42 @@ def submit():
     else:
         return f"Directory for username {username} already exists"
 
+def perform_capture():
+    image = take_photo()
+    image = get_RGB(image)
+    recognized_image = recognize_n_save(image)
+    img_base64 = reformat_image(recognized_image)
+    publish_capture_event(img_base64)
+    return img_base64
+
+@app.route('/stream')
+def stream():
+    def event_stream():
+        q = queue.Queue()
+        with subscribers_lock:
+            capture_subscribers.append(q)
+        try:
+            while True:
+                try:
+                    payload = q.get(timeout=15)
+                    yield f"data: {payload}/n/n"
+                except queue.Empty:
+                    yield ": keepalive /n/n"
+        finally:
+            with subscribers_lock:
+                capture_subscribers.remove(q)
+
+    return Response(event_stream(), mimetype='text/event-stream')
+
 
 @app.route('/capture', methods=['POST'])
 def capture(): ## Triggered by physical and virtual button push
-    image = take_photo() ## Get image from XIAO S3 Sense
-
     try:
-        image = get_RGB(image) ## Convert to RGB
+        img_base64 = perform_capture()
 
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
     
-    recognized_image = recognize_n_save(image) ## Match face and groceries, draw box, save to user
-    img_base64 = reformat_image(recognized_image) ## Convert to JPG, return as as bitstream
     return jsonify({'text': '', 'image': img_base64})
 
 
@@ -330,4 +362,4 @@ if __name__ == '__main__':
     load_faces_and_encodings(user_directory)
     if(connected):
         start_listener()
-    app.run(debug = True, use_reloader=False)
+    app.run(debug = True, use_reloader=False, threaded=True)
