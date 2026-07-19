@@ -98,11 +98,13 @@ def listen_for_trigger():
     global ser
     while True:
         try:
-            with serial_lock:
-                if ser.in_waiting > 0:
+            if ser.in_waiting > 0:
+                with serial_lock:
                     line = ser.readline().decode('utf-8').rstrip()
-                    if line == "Take_Photo":
-                        capture()
+                if line == "Take_Photo":
+                    print("received message from PCB")
+                    serial_lock.release
+                    capture()
         except Exception as e:
             print(f"Listener error: {e}")
         
@@ -121,7 +123,7 @@ def read_image_from_serial(ser):
 
         # Read the length of the image
         img_len_bytes = ser.read(4)
-        if img_len_bytes != 4:
+        if len(img_len_bytes) != 4:
             print("issue while reading Header Information over serial")
             raise IOError
         
@@ -312,7 +314,7 @@ def capture(): ## Triggered by physical and virtual button push
     
     recognized_image = recognize_n_save(image) ## Match face and groceries, draw box, save to user
     img_base64 = reformat_image(recognized_image) ## Convert to JPG, return as as bitstream
-    return {'text': '', 'image': img_base64}
+    return jsonify({'text': '', 'image': img_base64})
 
 
 @app.route('/captureNewUser', methods=['POST'])
