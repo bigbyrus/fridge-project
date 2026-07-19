@@ -34,12 +34,11 @@ except serial.SerialException as e:
 # instantiate Flask
 app = Flask(__name__)
 serial_lock = threading.Lock()
-
-
-capture_subscribers = []
 subscribers_lock = threading.Lock()
 
 def publish_capture_event(img_base64, text=''):
+    global capture_subscribers
+
     load = json.dumps({'text': text, 'image': img_base64})
     with subscribers_lock:
         subscribers = list(capture_subscribers)
@@ -57,6 +56,7 @@ def sys_init():
     global face_encodings
     global face_names
     global user_directory
+    global capture_subscribers
 
     user_directory = os.path.join(os.getcwd(), "static", "user_faces")
 
@@ -64,13 +64,14 @@ def sys_init():
     face_locations = []
     face_encodings = []
     face_names = []
+    capture_subscribers = []
 
     honey_path = os.path.join(os.getcwd(), "util-images", "tryAgain.jpg")
     honey_image = face_recognition.load_image_file(honey_path)
 
     lebron_path = os.path.join(os.getcwd(), "util-images", "lebron.jpg")
     lebron_image = face_recognition.load_image_file(lebron_path)
-    lebron_face_encoding = face_recognition.face_encodings(lebron_image)[0]
+    lebron_face_encoding = face_recognition.face_encodings(lebron_image, num_jitters=10)[0]
     known_users = ["LBJ"]
     known_face_encodings = np.array([lebron_face_encoding])
 
@@ -95,7 +96,7 @@ def load_faces_and_encodings(directory):
             image = face_recognition.load_image_file(image_path)
 
             # Find the face locations and encodings in the image
-            preStored_face_encodings = face_recognition.face_encodings(image)
+            preStored_face_encodings = face_recognition.face_encodings(image, num_jitters=10)
 
             # Assuming there is one face per image, take the first encoding
             if preStored_face_encodings:
@@ -177,6 +178,15 @@ def extract_prefix_before_number(url):
         return match.group()
     else:
         return ""
+    
+
+def perform_capture():
+    image = take_photo()
+    image = get_RGB(image)
+    recognized_image = recognize_n_save(image)
+    img_base64 = reformat_image(recognized_image)
+    publish_capture_event(img_base64)
+    return img_base64
 
 
 def take_photo():
@@ -190,9 +200,6 @@ def take_photo():
         return honey_image
     
     lastCaptureTime = currentTime
-    #camera = cv2.VideoCapture(0)
-    #return_value, image = camera.read()
-    #camera.release()
     try:
         anImage = read_image_from_serial(ser)
         image = anImage
@@ -297,7 +304,7 @@ def submit():
     save_path = os.path.join(user_directory, username + ".jpg")
     image.save(save_path)
     this_image = face_recognition.load_image_file(save_path)
-    this_face_encoding = face_recognition.face_encodings(this_image)
+    this_face_encoding = face_recognition.face_encodings(this_image, num_jitters=10)
     if this_face_encoding:
         global known_face_encodings
         known_face_encodings = np.vstack([known_face_encodings, this_face_encoding[0]])
@@ -310,19 +317,14 @@ def submit():
         return f"Directory for username {username} created"
     else:
         return f"Directory for username {username} already exists"
-
-def perform_capture():
-    image = take_photo()
-    image = get_RGB(image)
-    recognized_image = recognize_n_save(image)
-    img_base64 = reformat_image(recognized_image)
-    publish_capture_event(img_base64)
-    return img_base64
+    
 
 @app.route('/stream')
 def stream():
     def event_stream():
+        global capture_subscribers
         q = queue.Queue()
+
         with subscribers_lock:
             capture_subscribers.append(q)
         try:
