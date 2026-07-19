@@ -41,7 +41,7 @@ subscribers_lock = threading.Lock()
 
 def publish_capture_event(img_base64, text=''):
     load = json.dumps({'text': text, 'image': img_base64})
-    with subscribers_lock():
+    with subscribers_lock:
         subscribers = list(capture_subscribers)
     for sub in subscribers:
         sub.put(load)
@@ -110,12 +110,13 @@ def listen_for_trigger():
     global ser
     while True:
         try:
-            with serial_lock:
-                ser.timeout = 0.5
-                line = ser.readline().decode('utf-8').rstrip()
-            if line == "Take_Photo":
-                print("received image from the PCB")
-                perform_capture()
+            if ser.in_waiting > 0:
+                with serial_lock:
+                    ser.timeout = 0.5
+                    line = ser.readline().decode('utf-8').rstrip()
+                if line == "Take_Photo":
+                    print("received image from the PCB")
+                    perform_capture()
         except Exception as e:
             print(f"Listener error: {e}")
 
@@ -328,9 +329,9 @@ def stream():
             while True:
                 try:
                     payload = q.get(timeout=15)
-                    yield f"data: {payload}/n/n"
+                    yield f"data: {payload}\n\n"
                 except queue.Empty:
-                    yield ": keepalive /n/n"
+                    yield ": keepalive\n\n"
         finally:
             with subscribers_lock:
                 capture_subscribers.remove(q)

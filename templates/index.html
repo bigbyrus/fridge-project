@@ -58,7 +58,7 @@
 
         function renderCapture(data){
             res.innerText = data.text;
-            imageContainer.innerHTML = '<img src="data:image/jpeg;base64,${data.image}" alt="Captured Image">';
+            imageContainer.innerHTML = `<img src="data:image/jpeg;base64,${data.image}" alt="Captured Image">`;
         }
 
         const captureStream = new EventSource('/stream');
@@ -77,7 +77,7 @@
                 });
 
                 if(!response.ok){
-                    throw new Error('Capture failed: ${response.status} ${response.statusText}');
+                    throw new Error(`Capture failed: ${response.status} ${response.statusText}`);
                 }
             } catch(err){
                 console.error('Capture error: ', err);
