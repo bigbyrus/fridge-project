@@ -1,51 +1,29 @@
-import cv2
-from flask import Flask, render_template, request, url_for, jsonify, Response
-from PIL import Image
-from io import BytesIO
-import numpy as np
+import re
 import os
-import face_recognition
-from PIL import Image
-from datetime import datetime
-from io import BytesIO
+import cv2
+import json
+import time
+import queue
 import base64
 import serial
-import time
 import threading
-import re
+import numpy as np
+from PIL import Image
+from io import BytesIO
+import face_recognition
+from datetime import datetime
 from urllib.parse import urlparse
-import json
-import queue
+from flask import Flask, render_template, request, url_for, jsonify, Response
 
-# scaling necessary for face_recognition, depends on esp vs webcam
-scale_up = 4
-scale_down = .25
-connected = False
 
-# attempt to connect to PCB
-try:
-    ser = serial.Serial('/dev/tty.usbmodem14201', 115200, timeout=500)
-    scale_up = 2
-    scale_down = .5
-    connected = True
-except serial.SerialException as e:
-    print("Please check the port and try again.")
 
-# instantiate Flask
+# important globals
 app = Flask(__name__)
 serial_lock = threading.Lock()
 subscribers_lock = threading.Lock()
 
-def publish_capture_event(img_base64, text=''):
-    global capture_subscribers
 
-    load = json.dumps({'text': text, 'image': img_base64})
-    with subscribers_lock:
-        subscribers = list(capture_subscribers)
-    for sub in subscribers:
-        sub.put(load)
-
-# initialize system before running dev server
+# INITIALIZE the system before running dev server
 def sys_init():
     global known_users
     global known_face_encodings
@@ -57,6 +35,24 @@ def sys_init():
     global face_names
     global user_directory
     global capture_subscribers
+    global scale_up
+    global scale_down
+    global connected
+    global ser
+
+    # scaling necessary for face_recognition, depends on esp vs webcam
+    scale_up = 4
+    scale_down = .25
+    connected = False
+
+    # attempt to connect to PCB
+    try:
+        ser = serial.Serial('/dev/tty.usbmodem14201', 115200, timeout=500)
+        scale_up = 2
+        scale_down = .5
+        connected = True
+    except serial.SerialException as e:
+        print("Please check the port and try again.")
 
     user_directory = os.path.join(os.getcwd(), "static", "user_faces")
 
@@ -76,16 +72,7 @@ def sys_init():
     known_face_encodings = np.array([lebron_face_encoding])
 
 
-# add each folder within a directory into an ARRAY
-def get_folders(directory):
-    folders = []
-    for item in os.listdir(directory):
-        if os.path.isdir(os.path.join(directory, item)):
-            folders.append(item)
-    return folders
-
-
-# Scans user_faces and reloads known_faces after reboot
+# Scans user_faces and reloads known_users and known_face_encodings on boot/after reboot
 def load_faces_and_encodings(directory):
     global known_users
     global known_face_encodings
@@ -106,12 +93,13 @@ def load_faces_and_encodings(directory):
                 print(f"No faces found in image: {file_name}")
 
 
-
+# Read for `trigger` caused by pushbutton on PCB
 def listen_for_trigger():
     global ser
     while True:
         try:
             if ser.in_waiting > 0:
+                # important to protect the shared resource (serial port)
                 with serial_lock:
                     ser.timeout = 0.5
                     line = ser.readline().decode('utf-8').rstrip()
@@ -122,73 +110,45 @@ def listen_for_trigger():
             print(f"Listener error: {e}")
 
 
+# Create another thread so ``listen_for_trigger()`` runs in the background
 def start_listener():
     global listener_thread
     listener_thread = threading.Thread(target=listen_for_trigger, daemon=True)
     listener_thread.start()
 
 
+# receive and process image data from the external camera module
 def read_image_from_serial(ser):
     with serial_lock:
         ser.timeout = 500
         try:
             ser.write(b'TRIGGER')
 
-            # Read the length of the image
+            # read the length of the image provided by external camera
             img_len_bytes = ser.read(4)
             if len(img_len_bytes) != 4:
                 print("issue while reading Header Information over serial")
                 raise IOError
             
+            # convert raw image length data into an int
             img_len = int.from_bytes(img_len_bytes, 'little')
             print(f"Image length: {img_len}")
 
-            # Read the image data
+            # read the image data using the length provided by the camera
             img_data = ser.read(img_len)
             if len(img_data) != img_len:
                 print(f"Failed to read the full image. Read {len(img_data)} bytes.")
                 raise IOError()
 
-            # Decode the image
+            # decode the image
             img_array = np.frombuffer(img_data, dtype=np.uint8)
             img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
             return img
         finally:
-            ser.timeout = 0.5
+            ser.timeout = 0.5    
 
 
-def get_RGB(image):
-    return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
-
-def reformat_image(image):
-    pil_image = Image.fromarray(image)
-    img_buffer = BytesIO()
-    pil_image.save(img_buffer, format="JPEG")
-    img_str = img_buffer.getvalue()
-    img_base64 = base64.b64encode(img_str).decode('utf-8')
-    return img_base64 
-
-
-def extract_prefix_before_number(url):
-    path = urlparse(url).path
-    image_name = path.split('/')[-1]
-    match = re.match(r'^[^\d]*', image_name)
-    if match:
-        return match.group()
-    else:
-        return ""
-    
-
-def perform_capture():
-    image = take_photo()
-    image = get_RGB(image)
-    recognized_image = recognize_n_save(image)
-    img_base64 = reformat_image(recognized_image)
-    publish_capture_event(img_base64)
-    return img_base64
-
-
+# Receive an image from the camera by writing to the serial port
 def take_photo():
     global honey_image
     global lastCaptureTime
@@ -212,13 +172,14 @@ def take_photo():
     return image
 
 
+# Given RGB image from camera, use `face_recognition/api.py` to recognize, and draw rectangle around, faces found
 def recognize_n_save(image):
     small_image = cv2.resize(image, (0, 0), fx=scale_down, fy=scale_down)
     face_locations = face_recognition.face_locations(small_image)
     new_face_encodings = face_recognition.face_encodings(small_image, face_locations)
     face_names = []
     for face_encoding in new_face_encodings:
-        # See if the face is a match for the known face(s)
+        # see if the face is a match for the known face(s)
         matches = face_recognition.compare_faces(known_face_encodings, face_encoding)
         name = "???"
         face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
@@ -235,7 +196,7 @@ def recognize_n_save(image):
         print(face_names)
 
     for (top, right, bottom, left), name in zip(face_locations, face_names):
-        # Scale back up face locations since the image we detected in was scaled to 1/4 size
+        # scale back up face locations since the image we detected in was scaled to 1/4 size
         top *= scale_up
         right *= scale_up
         bottom *= scale_up
@@ -245,6 +206,68 @@ def recognize_n_save(image):
         font = cv2.FONT_HERSHEY_DUPLEX
         cv2.putText(image, name, (left + 6, bottom - 6), font, 1.0, (255, 255, 255), 1)
     return image  
+
+
+# Receive and process image from the external camera, and give it to the browser to display
+def perform_capture():
+
+    # receive and process image
+    image = take_photo()
+    image = get_RGB(image)
+    recognized_image = recognize_n_save(image)
+
+    # convert processed image to base64 string for the browser
+    img_base64 = reformat_image(recognized_image)
+
+    # send to /stream route so browser can display image
+    publish_capture_event(img_base64)
+
+    # return base64 representation of image
+    return img_base64
+
+
+def publish_capture_event(img_base64, text=''):
+    global capture_subscribers
+
+    load = json.dumps({'text': text, 'image': img_base64})
+    with subscribers_lock:
+        subscribers = list(capture_subscribers)
+    for sub in subscribers:
+        sub.put(load)
+
+
+# convert image from BGR to RGB
+def get_RGB(image):
+    return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+
+# add each folder within a directory into an ARRAY
+def get_folders(directory):
+    folders = []
+    for item in os.listdir(directory):
+        if os.path.isdir(os.path.join(directory, item)):
+            folders.append(item)
+    return folders
+
+
+
+def extract_prefix_before_number(url):
+    path = urlparse(url).path
+    image_name = path.split('/')[-1]
+    match = re.match(r'^[^\d]*', image_name)
+    if match:
+        return match.group()
+    else:
+        return ""
+
+# convert image to base64 string representation
+def reformat_image(image):
+    pil_image = Image.fromarray(image)
+    img_buffer = BytesIO()
+    pil_image.save(img_buffer, format="JPEG")
+    img_str = img_buffer.getvalue()
+    img_base64 = base64.b64encode(img_str).decode('utf-8')
+    return img_base64 
 
 
 @app.route('/')
