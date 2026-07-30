@@ -14,6 +14,8 @@ import face_recognition
 from datetime import datetime
 from urllib.parse import urlparse
 from flask import Flask, render_template, request, url_for, jsonify, Response
+import ast
+from inference_sdk import InferenceHTTPClient
 
 
 
@@ -21,6 +23,12 @@ from flask import Flask, render_template, request, url_for, jsonify, Response
 app = Flask(__name__)
 serial_lock = threading.Lock()
 subscribers_lock = threading.Lock()
+
+OBJECT_DETECTION_MODEL_ID = "ingredient-detection-5uzov/5"
+CLIENT = InferenceHTTPClient(
+    api_url="https://detect.roboflow.com",
+    api_key=os.environ.get("ROBOFLOW_API_KEY", "")
+)
 
 
 # INITIALIZE the system before running dev server
@@ -117,6 +125,17 @@ def start_listener():
     listener_thread.start()
 
 
+# process captured image to detect grocery
+def detect_object(image):
+    try:
+        result = CLIENT.infer(image, model_id=OBJECT_DETECTION_MODEL_ID)
+        result_dict = ast.literal_eval(str(result))
+        pred = result_dict["predictions"][0]["class"]
+    except Exception as e:
+        print(f"Object detection failed: {e}")
+        pred = "unknown"
+    return str(pred)
+
 # receive and process image data from the external camera module
 def read_image_from_serial(ser):
     with serial_lock:
@@ -188,12 +207,21 @@ def recognize_n_save(image):
             name = known_users[best_match_index]
             now = datetime.now()
             pil_image = Image.fromarray(image)
-            target_dir = os.path.join(user_directory, name, now.strftime("%Y-%m-%d-%H-%M") + ".jpg")
+            word = detect_object(image)
+            target_dir = os.path.join(user_directory, name, word + "_" + now.strftime("%Y-%m-%d-%H-%M") + ".jpg")
             pil_image.save(target_dir)
             face_names.append(name)
         else:
             face_names = [name] * len(face_locations)
-        print(face_names)
+
+    # save photos that don't contain any recognized faces 
+    if len(face_names) == 0:
+        now = datetime.now()
+        word = detect_object(image)
+        misc_dir_folder = os.path.join(user_directory, "Unrecognized")
+        os.makedirs(misc_dir_folder, exist_ok=True)
+        misc_dir = os.path.join(misc_dir_folder, word + "_" + now.strftime("%Y-%m-%d-%H-%M-%S") + ".jpg")
+        Image.fromarray(image).save(misc_dir)
 
     for (top, right, bottom, left), name in zip(face_locations, face_names):
         # scale back up face locations since the image we detected in was scaled to 1/4 size
