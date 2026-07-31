@@ -139,6 +139,8 @@ def detect_object(image):
 # receive and process image data from the external camera module
 def read_image_from_serial(ser):
     with serial_lock:
+
+        ## longer time expected for image data
         ser.timeout = 500
         try:
             ser.write(b'TRIGGER')
@@ -149,7 +151,7 @@ def read_image_from_serial(ser):
                 print("issue while reading Header Information over serial")
                 raise IOError
             
-            # convert raw image length data into an int
+            # convert raw image length data into an int (little endianness)
             img_len = int.from_bytes(img_len_bytes, 'little')
             print(f"Image length: {img_len}")
 
