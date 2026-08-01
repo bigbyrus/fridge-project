@@ -11,8 +11,6 @@ To address this problem, our team created a mountable device that students can p
 
 ## Highlights of the Project
 
-These highlight the Embedded Systems portion of the project that I understand, and can confidently speak about in an interview. Portions of code relating to HTML, Jinja, /stream, json.dumps(), etc. are not mentioned because I do not yet understand all of the concepts regarding web development and JavaScript. But I might learn if it strengthens my skills and an embedded engineer.
-
 
 ### Critical Section Management
     An image capture can be initiated by two threads independently. These two threads both access the same Serial object, which was an oversight that led to many issues throughout development.  
@@ -33,15 +31,13 @@ This process is a **critical section** within the code because two threads could
 ---
 
 **// TODO**
-### Development on ESP32  
-The external camera module is a small PCB containing an OV2640 camera and an ESP32 microcontroller. This PCB is mounted on a fridge, and is responsible for capturing images.  
+### Development on ESP32-S3  
+Developed firmware so that the microcontroller could connect to the peripheral OV2640 CMOS image sensor. This gave us control over the image quality, output format, and frame buffers allowing us to write JPEG compressed images to the RaspberryPi without any latency.
 
 ---
 
 ### Processing on RaspberryPi
-Facial Recognition with OpenCV utilizes an excessive amount of resources so we opted to offload image processing to a RaspberryPi 2. To execute this we had to download the Python Wheels version of OpenCV, which benefits from the full Linux operating system provided by the RaspberryPi, as well as the improved CPU speed so that facial recognition can be done in real time.
-
-The Python Wheels version of OpenCV is around 200MB, and requires an Operating System to function. Making the RaspberryPi a straightforward solution to our "mountable device" problem. 
+Facial Recognition with OpenCV utilizes an excessive amount of resources so we opted to offload image processing to a RaspberryPi 2. To execute this we had to download the Python Wheels version of OpenCV, which benefits from the full Linux operating system, as well as the improved CPU speed provided by the RaspberryPi. Allowing facial recognition and object detection to be done in real time.
 
 ---
 
