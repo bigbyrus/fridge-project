@@ -2,7 +2,6 @@
 #include <Arduino.h>
 
 // Camera module pin definitions
-
 #define CAMERA_MODEL_XIAO_ESP32S3 // Has PSRAM
 #define PWDN_GPIO_NUM     -1
 #define RESET_GPIO_NUM    -1
@@ -21,20 +20,21 @@
 #define HREF_GPIO_NUM     47
 #define PCLK_GPIO_NUM     13
 #define BUTTON_PIN        D8
+
+// Global variables
+camera_config_t config;
 int i = 0;
 unsigned long lastPressTime = 0;  // Store the time of the last button press
 const unsigned long debounceDelay = 5000;  // 5 seconds debounce delay
 
-
+// configure microcontroller
 void setup() {
   Serial.begin(115200);
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, HIGH);
   pinMode(BUTTON_PIN, INPUT_PULLDOWN);
-  //Serial.println("hola");
-  //Serial.setDebugOutput(true);
-  //Serial.println();
-  camera_config_t config;
+  
+  // configure the camera struct
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
   config.pin_d0 = Y2_GPIO_NUM;
@@ -54,45 +54,35 @@ void setup() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 10000000;
-  config.frame_size = FRAMESIZE_UXGA;
+  config.frame_size = FRAMESIZE_UXGA;   // assuming PSRAM available
   config.pixel_format = PIXFORMAT_JPEG; // for streaming
-  //config.pixel_format = PIXFORMAT_RGB565; // for face detection/recognition
-  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
-  config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 10;
-  config.fb_count = 1;
+  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY; // assuming PSRAM unavailable
+  config.fb_location = CAMERA_FB_IN_PSRAM;  // assuming PSRAM available
+  config.jpeg_quality = 10; // assuming PSRAM unavailable
+  config.fb_count = 1;  // assuming PSRAM unavailable
 
-  if(config.pixel_format == PIXFORMAT_JPEG){
-    if(psramFound()){
-      config.jpeg_quality = 2;
-      config.fb_count = 2;
-      config.grab_mode = CAMERA_GRAB_LATEST;
-    } else {
-      // Limit the frame size when PSRAM is not available
-      config.frame_size = FRAMESIZE_HD;
-      config.fb_location = CAMERA_FB_IN_DRAM;
-    }
-  } else {
-    // Best option for face detection/recognition
-    config.frame_size = FRAMESIZE_HD;
-#if CONFIG_IDF_TARGET_ESP32S3
+  // ensure external RAM is being used
+  if(psramFound()){
+    config.jpeg_quality = 2;
     config.fb_count = 2;
-#endif
+    config.grab_mode = CAMERA_GRAB_LATEST;
+  } 
+  else {  // reduce pixel resolution when PSRAM isn't available
+    config.frame_size = FRAMESIZE_HD;
+    config.fb_location = CAMERA_FB_IN_DRAM;
   }
 
-  // Initialize the camera
+  // init OV3660 using the config struct
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
     Serial.printf("Camera init failed with error 0x%x", err);
     return;
   }
 
-  sensor_t * s = esp_camera_sensor_get();
-  // initial sensors are flipped vertically and colors are a bit saturated
-  if (s->id.PID == OV3660_PID) {
-    //s->set_vflip(s, 1); // Flip it back
-    s->set_brightness(s, 10); // Up the brightness just a bit
-    //s->set_saturation(s, -2); // Lower the saturation
+  // configure the OV3660 image sensor
+  sensor_t *s = esp_camera_sensor_get();
+  if(s->id.PID == OV3660_PID){
+    s->set_brightness(s, 10); // up the brightness just a bit
   }
   
   // Set exposure time (adjust this value as needed)
@@ -101,55 +91,59 @@ void setup() {
   s->set_agc_gain(s, 0); // Turn off automatic gain control
   s->set_aec_value(s, 2000);
 
-  // Drop down frame size for higher initial frame rate
+  // Drop down frame size for higher initial frame rate (speed up camera init)
   if(config.pixel_format == PIXFORMAT_JPEG) {
     s->set_framesize(s, FRAMESIZE_QVGA);
   }
-
-#if defined(CAMERA_MODEL_XIAO_ESP32S3)
-  s->set_brightness(s, 10);
-  //s->set_vflip(s, 1);
-  //s->set_hmirror(s, 1);
-#endif
-
 }
+
+
+
+// main loop
 void loop() {
   i+=1;
    
-  if (Serial.available() > 0) {
+  if(Serial.available() > 0){
+
+    // expect String data from the RaspberryPi
     String command = Serial.readStringUntil('\n');
     
-    if (command == "TRIGGER") {
+    // if the String is recognized, capture image and write its data to serial
+    if(command == "TRIGGER"){
         digitalWrite(LED_BUILTIN, LOW);
+
+        // get a pointer to a *frozen* frame buffer in PSRAM
         camera_fb_t *fb = esp_camera_fb_get();
-        if (!fb) {
+        if(!fb){
           Serial.println("Camera capture failed");
           return;
         }
+
+        // flush serial port before writing to it
         while(Serial.available() > 0){
           Serial.read();
         }
-        // Send the frame data over Serial
-        Serial.write((uint8_t*)&fb->len, sizeof(fb->len)); // Send the length of the image
-        Serial.write(fb->buf, fb->len); // Send the image buffer
-        //Serial.println("hola");
-        // Return the frame buffer back to the driver for reuse
-        esp_camera_fb_return(fb);
-        // Delay for a bit to avoid flooding the serial port
+
+        // Send image data over Serial
+        Serial.write((uint8_t*) &fb->len, sizeof(fb->len)); // send length of the image
+        Serial.write(fb->buf, fb->len); // send image buffer
         
+        // release the **frozen** frame buffer in RAM
+        esp_camera_fb_return(fb);
+
+        // Delay for a bit to avoid flooding the serial port
         delay(200);
         digitalWrite(LED_BUILTIN, HIGH);
-        
     }    
-        
   }
+
+  // poll GPIO pin 8 for a button press
   String take_photo = "Take_Photo";
   unsigned long currentTime = millis();
-  if ((digitalRead(BUTTON_PIN) == HIGH) && Serial.available() == 0 && (currentTime - lastPressTime > debounceDelay)){
+  if((digitalRead(BUTTON_PIN) == HIGH) && (Serial.available() == 0) && (currentTime-lastPressTime > debounceDelay)){
+
+    // instruct RaspberryPi to write "TRIGGER" over serial
     Serial.println(take_photo);
     lastPressTime = currentTime;
-
-    //Serial.println((analogRead(BUTTON_PIN)));
-  }    
-  //Serial.println("hola");
+  }
 }

@@ -1,46 +1,86 @@
-import cv2
-from flask import Flask, render_template, request, Response, redirect, url_for, json, jsonify
 import re
-from urllib.parse import urlparse
-from PIL import Image
-from io import BytesIO
-import numpy as np
 import os
-import face_recognition
-from PIL import Image
-from datetime import datetime
-from io import BytesIO
-import base64
-import string
-import serial
+import cv2
+import json
 import time
+import queue
+import base64
+import serial
 import threading
+import numpy as np
+from PIL import Image
+from io import BytesIO
+import face_recognition
+from datetime import datetime
+from urllib.parse import urlparse
+from flask import Flask, render_template, request, url_for, jsonify, Response
+import ast
+from inference_sdk import InferenceHTTPClient
 
-lastCaptureTime = 0
-captureInterval = 5
 
-## Scaling necessary for face_recognition, depends on esp vs webcam
-scale_up = 4
-scale_down = .25
-try:
-    ser = serial.Serial('COM8', 115200, timeout=100)
-    scale_up = 2
-    scale_down = .5
-    connected = True
-except serial.SerialException as e:
-    print("Please check the port and try again.")
 
-# Need LeBron to poulate np array correctly
-honey_path = os.path.join(os.getcwd(), "tryAgain.jpg")
-honey_image = face_recognition.load_image_file(honey_path)
-lebron_path = os.path.join(os.getcwd(), "lebron.jpg")
-lebron_image = face_recognition.load_image_file(lebron_path)
-lebron_face_encoding = face_recognition.face_encodings(lebron_image)[0]
+# important globals
 app = Flask(__name__)
-known_users = ["LBJ"]
-known_face_encodings = np.array([lebron_face_encoding])
+serial_lock = threading.Lock()
+subscribers_lock = threading.Lock()
 
-# Scans user_faces and reloads known_faces after reboot
+OBJECT_DETECTION_MODEL_ID = "ingredient-detection-5uzov/5"
+CLIENT = InferenceHTTPClient(
+    api_url="https://detect.roboflow.com",
+    api_key=os.environ.get("ROBOFLOW_API_KEY", "")
+)
+
+
+# INITIALIZE the system before running dev server
+def sys_init():
+    global known_users
+    global known_face_encodings
+    global honey_path
+    global honey_image
+    global lastCaptureTime
+    global face_locations
+    global face_encodings
+    global face_names
+    global user_directory
+    global capture_subscribers
+    global scale_up
+    global scale_down
+    global connected
+    global ser
+
+    # scaling necessary for face_recognition, depends on esp vs webcam
+    scale_up = 4
+    scale_down = .25
+    connected = False
+
+    # attempt to connect to PCB
+    try:
+        ser = serial.Serial('/dev/tty.usbmodem14201', 115200, timeout=500)
+        scale_up = 2
+        scale_down = .5
+        connected = True
+    except serial.SerialException as e:
+        print("Please check the port and try again.")
+
+    user_directory = os.path.join(os.getcwd(), "static", "user_faces")
+
+    lastCaptureTime = 0
+    face_locations = []
+    face_encodings = []
+    face_names = []
+    capture_subscribers = []
+
+    honey_path = os.path.join(os.getcwd(), "util-images", "tryAgain.jpg")
+    honey_image = face_recognition.load_image_file(honey_path)
+
+    lebron_path = os.path.join(os.getcwd(), "util-images", "lebron.jpg")
+    lebron_image = face_recognition.load_image_file(lebron_path)
+    lebron_face_encoding = face_recognition.face_encodings(lebron_image, num_jitters=10)[0]
+    known_users = ["LBJ"]
+    known_face_encodings = np.array([lebron_face_encoding])
+
+
+# Scans user_faces and reloads known_users and known_face_encodings on boot/after reboot
 def load_faces_and_encodings(directory):
     global known_users
     global known_face_encodings
@@ -51,7 +91,7 @@ def load_faces_and_encodings(directory):
             image = face_recognition.load_image_file(image_path)
 
             # Find the face locations and encodings in the image
-            preStored_face_encodings = face_recognition.face_encodings(image)
+            preStored_face_encodings = face_recognition.face_encodings(image, num_jitters=10)
 
             # Assuming there is one face per image, take the first encoding
             if preStored_face_encodings:
@@ -60,68 +100,76 @@ def load_faces_and_encodings(directory):
             else:
                 print(f"No faces found in image: {file_name}")
 
+
+# Read for `trigger` caused by pushbutton on PCB
 def listen_for_trigger():
     global ser
     while True:
         try:
             if ser.in_waiting > 0:
-                line = ser.readline().decode('utf-8').rstrip()
+                # important to protect the shared resource (serial port)
+                with serial_lock:
+                    ser.timeout = 0.5
+                    line = ser.readline().decode('utf-8').rstrip()
                 if line == "Take_Photo":
-                    capture()
-                    
+                    print("received image from the PCB")
+                    perform_capture()
         except Exception as e:
-            pass
-        time.sleep(0.1)  # Adjust the sleep time as needed
-    
-user_directory = os.path.join(os.getcwd(),"static", "user_faces")
-load_faces_and_encodings(user_directory)
-face_locations = []
-face_encodings = []
-face_names = []
+            print(f"Listener error: {e}")
 
+
+# Create another thread so ``listen_for_trigger()`` runs in the background
 def start_listener():
     global listener_thread
     listener_thread = threading.Thread(target=listen_for_trigger, daemon=True)
     listener_thread.start()
 
+
+# process captured image to detect grocery
+def detect_object(image):
+    try:
+        result = CLIENT.infer(image, model_id=OBJECT_DETECTION_MODEL_ID)
+        result_dict = ast.literal_eval(str(result))
+        pred = result_dict["predictions"][0]["class"]
+    except Exception as e:
+        print(f"Object detection failed: {e}")
+        pred = "unknown"
+    return str(pred)
+
+# receive and process image data from the external camera module
 def read_image_from_serial(ser):
-    ser.write(b'TRIGGER')
-    # Read the length of the image
-    img_len_bytes = ser.read(4)
-    img_len = int.from_bytes(img_len_bytes, 'little')
-    print(f"Image length: {img_len}")
+    with serial_lock:
 
-    # Read the image data
-    img_data = ser.read(img_len)
-    if len(img_data) != img_len:
-        print(f"Failed to read the full image. Read {len(img_data)} bytes.")
-        return None
+        ## longer time expected for image data
+        ser.timeout = 0.5
+        try:
+            ser.write(b'TRIGGER')
 
-    # Decode the image
-    img_array = np.frombuffer(img_data, dtype=np.uint8)
-    img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-    return img
+            # read the length of the image provided by external camera
+            img_len_bytes = ser.read(4)
+            if len(img_len_bytes) != 4:
+                print("issue while reading Header Information over serial")
+                raise IOError
+            
+            # convert raw image length data into an int (little endianness)
+            img_len = int.from_bytes(img_len_bytes, 'little')
+            print(f"Image length: {img_len}")
 
-def get_RGB(image):
-    return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            # read the image data using the length provided by the camera
+            img_data = ser.read(img_len)
+            if len(img_data) != img_len:
+                print(f"Failed to read the full image. Read {len(img_data)} bytes.")
+                raise IOError()
 
-def reformat_image(image):
-    pil_image = Image.fromarray(image)
-    img_buffer = BytesIO()
-    pil_image.save(img_buffer, format="JPEG")
-    img_str = img_buffer.getvalue()
-    img_base64 = base64.b64encode(img_str).decode('utf-8')
-    return img_base64 
+            # decode the image
+            img_array = np.frombuffer(img_data, dtype=np.uint8)
+            img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+            return img
+        finally:
+            ser.timeout = 0.005    
 
-def extract_prefix_before_number(url):
-    path = urlparse(url).path
-    image_name = path.split('/')[-1]
-    match = re.match(r'^[^\d]*', image_name)
-    if match:
-        return match.group()
-    else:
-        return ""
 
+# Receive an image from the camera by writing to the serial port
 def take_photo():
     global honey_image
     global lastCaptureTime
@@ -131,30 +179,28 @@ def take_photo():
     if currentTime - lastCaptureTime < 3:
         honey_image = get_RGB(honey_image)
         return honey_image
+    
     lastCaptureTime = currentTime
-    camera = cv2.VideoCapture(0)
-    return_value, image = camera.read()
-    camera.release()
     try:
         anImage = read_image_from_serial(ser)
-        #time.sleep(.05)
         image = anImage
         scale_up = 2
         scale_down = .5
     except Exception as e:
         scale_up = 4
         scale_down = .25
-        print("Please check the port and try again.(212)")
+        print("Image data over serial was corrupted")
     return image
 
+
+# Given RGB image from camera, use `face_recognition/api.py` to recognize, and draw rectangle around, faces found
 def recognize_n_save(image):
     small_image = cv2.resize(image, (0, 0), fx=scale_down, fy=scale_down)
-    rgb_small_image = cv2.cvtColor(small_image, cv2.COLOR_BGR2RGB)
-    face_locations = face_recognition.face_locations(rgb_small_image)
-    new_face_encodings = face_recognition.face_encodings(rgb_small_image, face_locations)
+    face_locations = face_recognition.face_locations(small_image)
+    new_face_encodings = face_recognition.face_encodings(small_image, face_locations)
     face_names = []
     for face_encoding in new_face_encodings:
-        # See if the face is a match for the known face(s)
+        # see if the face is a match for the known face(s)
         matches = face_recognition.compare_faces(known_face_encodings, face_encoding)
         name = "???"
         face_distances = face_recognition.face_distance(known_face_encodings, face_encoding)
@@ -163,15 +209,24 @@ def recognize_n_save(image):
             name = known_users[best_match_index]
             now = datetime.now()
             pil_image = Image.fromarray(image)
-            target_dir = os.path.join(user_directory, name, now.strftime("%Y-%m-%d-%H-%M-%S") + ".jpg")
+            word = detect_object(image)
+            target_dir = os.path.join(user_directory, name, word + "_" + now.strftime("%Y-%m-%d-%H-%M") + ".jpg")
             pil_image.save(target_dir)
             face_names.append(name)
         else:
             face_names = [name] * len(face_locations)
-        print(face_names)
+
+    # save photos that don't contain any recognized faces 
+    if len(face_names) == 0:
+        now = datetime.now()
+        word = detect_object(image)
+        misc_dir_folder = os.path.join(user_directory, "Unrecognized")
+        os.makedirs(misc_dir_folder, exist_ok=True)
+        misc_dir = os.path.join(misc_dir_folder, word + "_" + now.strftime("%Y-%m-%d-%H-%M-%S") + ".jpg")
+        Image.fromarray(image).save(misc_dir)
 
     for (top, right, bottom, left), name in zip(face_locations, face_names):
-        # Scale back up face locations since the image we detected in was scaled to 1/4 size
+        # scale back up face locations since the image we detected in was scaled to 1/4 size
         top *= scale_up
         right *= scale_up
         bottom *= scale_up
@@ -182,18 +237,84 @@ def recognize_n_save(image):
         cv2.putText(image, name, (left + 6, bottom - 6), font, 1.0, (255, 255, 255), 1)
     return image  
 
+
+# Receive and process image from the external camera, and give it to the browser to display
+def perform_capture():
+
+    # receive and process image
+    image = take_photo()
+    image = get_RGB(image)
+    recognized_image = recognize_n_save(image)
+
+    # convert processed image to base64 string for the browser
+    img_base64 = reformat_image(recognized_image)
+
+    # send to /stream route so browser can display image
+    publish_capture_event(img_base64)
+
+    # return base64 representation of image
+    return img_base64
+
+
+def publish_capture_event(img_base64, text=''):
+    global capture_subscribers
+
+    load = json.dumps({'text': text, 'image': img_base64})
+    with subscribers_lock:
+        subscribers = list(capture_subscribers)
+    for sub in subscribers:
+        sub.put(load)
+
+
+# convert image from BGR to RGB
+def get_RGB(image):
+    return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+
+# add each folder within a directory into an ARRAY
+def get_folders(directory):
+    folders = []
+    for item in os.listdir(directory):
+        if os.path.isdir(os.path.join(directory, item)):
+            folders.append(item)
+    return folders
+
+
+
+def extract_prefix_before_number(url):
+    path = urlparse(url).path
+    image_name = path.split('/')[-1]
+    match = re.match(r'^[^\d]*', image_name)
+    if match:
+        return match.group()
+    else:
+        return ""
+
+# convert image to base64 string representation
+def reformat_image(image):
+    pil_image = Image.fromarray(image)
+    img_buffer = BytesIO()
+    pil_image.save(img_buffer, format="JPEG")
+    img_str = img_buffer.getvalue()
+    img_base64 = base64.b64encode(img_str).decode('utf-8')
+    return img_base64 
+
+
 @app.route('/')
 def index(): 
     return render_template('index.html')
+
 
 @app.route('/users')
 def users():
     folders = get_folders(user_directory)
     return render_template('userPage.html', folders=folders)
 
+
 @app.route('/newUser')
 def newUser():
     return render_template('newUserPage.html')
+
 
 @app.route('/folder/<folder_name>')
 def folder(folder_name):
@@ -212,6 +333,7 @@ def folder(folder_name):
 
     return render_template('folder.html', folder_name=folder_name, image_data=image_data)
 
+
 @app.route('/delete', methods=['POST'])
 def delete_image():
     data = request.get_json()
@@ -224,12 +346,6 @@ def delete_image():
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-def get_folders(directory):
-    folders = []
-    for item in os.listdir(directory):
-        if os.path.isdir(os.path.join(directory, item)):
-            folders.append(item)
-    return folders
 
 @app.route('/submit', methods=['POST'])
 def submit():
@@ -241,26 +357,53 @@ def submit():
     save_path = os.path.join(user_directory, username + ".jpg")
     image.save(save_path)
     this_image = face_recognition.load_image_file(save_path)
-    this_face_encoding = face_recognition.face_encodings(this_image)
+    this_face_encoding = face_recognition.face_encodings(this_image, num_jitters=10)
     if this_face_encoding:
         global known_face_encodings
         known_face_encodings = np.vstack([known_face_encodings, this_face_encoding[0]])
     else:
         return "No face found in the image", 400
+    
     newUser_path = os.path.join(user_directory, username)
     if not os.path.exists(newUser_path):
         os.makedirs(newUser_path)
         return f"Directory for username {username} created"
     else:
         return f"Directory for username {username} already exists"
+    
+
+@app.route('/stream')
+def stream():
+    def event_stream():
+        global capture_subscribers
+        q = queue.Queue()
+
+        with subscribers_lock:
+            capture_subscribers.append(q)
+        try:
+            while True:
+                try:
+                    payload = q.get(timeout=15)
+                    yield f"data: {payload}\n\n"
+                except queue.Empty:
+                    yield ": keepalive\n\n"
+        finally:
+            with subscribers_lock:
+                capture_subscribers.remove(q)
+
+    return Response(event_stream(), mimetype='text/event-stream')
+
 
 @app.route('/capture', methods=['POST'])
 def capture(): ## Triggered by physical and virtual button push
-    image = take_photo() ## Get image from XIAO S3 Sense
-    image = get_RGB(image) ## Convert to RGB
-    recognized_image = recognize_n_save(image) ## Match face and groceries, draw box, save to user
-    img_base64 = reformat_image(recognized_image) ## Convert to JPG, return as as bitstream
-    return {'text': '', 'image': img_base64}
+    try:
+        img_base64 = perform_capture()
+
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+    
+    return jsonify({'text': '', 'image': img_base64})
+
 
 @app.route('/captureNewUser', methods=['POST'])
 def newUserCapture(): ## Triggered by virtual button push
@@ -269,7 +412,10 @@ def newUserCapture(): ## Triggered by virtual button push
     img_base64 = reformat_image(image) ## Convert to JPG, return as bitstream
     return {'text': '', 'image': img_base64}
 
+
 if __name__ == '__main__':
-    start_listener()
-    app.run(host = "0.0.0.0", port=8000)
-    ##python -m http.server 8000 --bind 0.0.0.0
+    sys_init()
+    load_faces_and_encodings(user_directory)
+    if(connected):
+        start_listener()
+    app.run(debug = True, use_reloader=False, threaded=True)
