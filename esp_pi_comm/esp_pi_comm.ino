@@ -72,7 +72,7 @@ void setup() {
     config.fb_location = CAMERA_FB_IN_DRAM;
   }
 
-  // init using the config struct
+  // init OV3660 using the config struct
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
     Serial.printf("Camera init failed with error 0x%x", err);

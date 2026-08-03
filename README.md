@@ -2,69 +2,79 @@
   <img src="util-images/project-poster.png" width="1000">
 </p>
 
-# Fridge ID
-Fridge ID was an embedded systems project requiring the integration of a custom PCB to solve a specific, modern, problem.  
-The problem our team chose to address was that of excessive food waste, especially among undergraduate students who share a small fridge. 
 
-To address this problem, our team created a mountable device that students can place on their fridge to easily catalog their groceries. This device creates and maintains a digital inventory over the web autonomously with the help of facial recognition and object detection.
+## Overview
+
+The project splits responsibilities across two processors connected by USB:
+
+- **ESP32-S3:** Configures the OV2640 image sensor and sends image data to the RaspberryPi 
+- **Raspberry Pi:** Serves the web UI, runs facial recognition and object detection on the images received
 
 
-## Highlights of the Project
+
+## ESP32 Firmware
+
+### Camera Configuration
+
+The camera sensor is configured at boot using the `camera_config_t` struct from `esp_camera.h`:
+
+- Pin definitions for I2C (SCCB) control lines and clock inputs
+- **Frame size**, **pixel format**, and **grab mode** settings
 
 
-### Critical Section Management
-    An image capture can be initiated by two threads independently. These two threads both access the same Serial object, which was an oversight that led to many issues throughout development.  
-    Once the bug was identified, more issues surfaced regarding the management of the Lock object.  
-
-    A background thread created on boot can write to the Serial port; this thread polls the Serial port waiting for the string "Take_Photo" to arrive. The infinite loop made the management of the Lock more difficult than expected.  
-
-    The main thread can also write to the serial port if a user issues a POST request through a browser. When first testing the system there was no synchronization between the two threads at all, causing undefined behavior at unexpected times.
-
----
+During development, adjusting the frame size and pixel format allowed us to address latency issues while maintaining the image quality required for facial recognition. We ultimately sent low quality JPEG compressed image data over serial, significantly reducing latency when capturing images.
 
 ### Serial Communication
-Whether an image capture is initiated by the background thread polling the serial port, or by the main thread responding to a POST request, the communication protocol is the same:
-    write 'TRIGGER' over serial --> read 4 bytes from serial --> convert the 4 bytes into an int --> read <int> bytes from serial --> use Numpy and OpenCV to interpret raw image data
 
-This process is a **critical section** within the code because two threads could potentially write to the same shared resource at the same time, resulting in all data from both threads being corrupted.
+The firmware's most important task is identfying and responding to a user's input:
 
----
-
-**// TODO**
-### Development on ESP32-S3  
-Developed firmware so that the microcontroller could connect to the peripheral OV2640 CMOS image sensor. This gave us control over the image quality, output format, and frame buffers allowing us to write JPEG compressed images to the RaspberryPi without any latency.
+| Input | Response |
+|---|---|
+| **Serial Port** | The MCU will read incoming serial data and respond to image requests made by the RaspberryPi. Grabbing a pointer to the most recently captured frame buffer and writing the image data to the serial port. |
+| **GPIO Pin 8** | When a user pushes the physical button on our PCB, the ESP32 writes `"Take_Photo"` to the Raspberry Pi, signaling it to respond with `"TRIGGER\n"` — which then triggers the image capture process described above. | 
 
 ---
 
-### Processing on RaspberryPi
-Facial Recognition with OpenCV utilizes an excessive amount of resources so we opted to offload image processing to a RaspberryPi 2. To execute this we had to download the Python Wheels version of OpenCV, which benefits from the full Linux operating system, as well as the improved CPU speed provided by the RaspberryPi. Allowing facial recognition and object detection to be done in real time.
+## Raspberry Pi
 
----
+The Raspberry Pi does the heavy lifting in this project. By integrating the Dlib an OpenCV libraries, the RaspberryPi extracts data necessary to maintain an autonomous digital inventory from the images captured by the OV2640. The facial recognition, object detection, and web server all run together on a single **main thread** while a second **background thread** is dedicated to handling `"Take_Photo"` requests from the ESP32.
 
-### Realization of a Complex System
-This project was a bit outlandish from the start, we proposed a mountable device that could efficiently perform computationally intensive facial recognition algorithms that relied on a full fledged Operating System to run. A small embedded system with that kind of power becomes difficult to realize when considering the engineering behind it.
+### 1. Main Thread
 
-We needed great processing power, with enough RAM to support a full Operating System, on a mountable device. Even still, in only six weeks our group went from a vague idea to a realized project that was presented for 75+ people.
+The main thread serves the web application via Flask, handling routing and HTTP requests. When an image arrives from the ESP32:
 
----
+- Using DLIB, detect face locations and extract facial embeddings, comparing them against known users for identification
+- Run a Roboflow object detection model to identify groceries in the frame
+- Using OpenCV, draw a rectangle around every face identified and list each user
+- Push the image to every client with the root path open for display
 
-### Coordination of ESP32C3 and RaspberryPi
-Due to the time constraint, we were able to achieve the goal of a "mountable device" that can support the memory and computation power needed for Facial Recognition in Python by connecting the camera to the RaspberryPi directly.  
-The camera uses an ESP32-C3 to control the peripheral CMOS Image sensor, and write the image data to the RaspberryPi using the communicatoin protocol defined earlier.  
-    Since the functionality was very simple we programmed the ESP32 using the Arduino IDE with an infinite loop instead of writing low-level firmware and integrating an RTOS.  
-    There was a time constraint, after all
+**Creating new users** is also done in this thread. A client's POST request triggers image capture and face location/embedding extraction. Using this, store the new face under `static/user_faces` for future recognition, and create of a new directory for that user's future images.
 
-The RaspberryPi does everything else:
-    Running Python Flask Development Server
-    Initiating image captures using the serial port
-    Monitoring the serial port for incoming text data (Take_Photo)
-    Control/Manipulation of persistent storage
-    Complex Facial Recognition (Python wrapped OpenCV/DLib)
-    Complex image data manipulation (Python wrapped OpenCV/DLib)
+### 2. Background Thread
 
----
+This thread ultimately polls the serial port for the `"Take_Photo"` string from the ESP32. When the string arrives, this thread responds by writing `"TRIGGER"` back to the ESP32, prompting it to send the captured JPEG.
 
-### Persistent Storage Management
-The RaspberryPi 2 does not have an SSD, but instead uses an SD Card as its persistent storage to mount Linux and store data. Outside of image processing and manipulation, a large amount of effort is put into organizing the project's file structure so that the server displays images properly as they arrive.
+```python
+def listen_for_trigger():
+    global ser
+    while True:
+        try:
+            if ser.in_waiting > 0:
+                # important to protect the shared resource (serial port)
+                with serial_lock:
+                    ser.timeout = 0.5
+                    line = ser.readline().decode('utf-8').rstrip()
+                if line == "Take_Photo":
+                    print("received image from the PCB")
+                    perform_capture()
+        except Exception as e:
+            print(f"Listener error: {e}")
+```
 
-The web server displays data that is located in the project's directory, if the directories are not named correctly, or the images are not saved in the right place there will be immediate errors within the web server.
+The `perform_capture()` function will uncompress the image data, allowing my application to have a full BGR pixel representation of the image as a NumPy array. Using this my application flips the array to obtain RGB, then runs facial recognition/object detection, saving the image to the digital inventory. Once the inventory is updated, the annotated image is pushed to clients so they can see the results.
+
+### 3. Serial Port Synchronization
+
+Both the main thread (issuing triggers from the web UI) and the background thread (listening for ESP32-initiated captures) access the same global `Serial` object. This created multiple unhandled critical sections around reads/writes to the port.
+
+Using a lock around all serial port accesses removed all undeterministic behavior caused by race conditions

@@ -141,7 +141,7 @@ def read_image_from_serial(ser):
     with serial_lock:
 
         ## longer time expected for image data
-        ser.timeout = 500
+        ser.timeout = 0.5
         try:
             ser.write(b'TRIGGER')
 
@@ -166,7 +166,7 @@ def read_image_from_serial(ser):
             img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
             return img
         finally:
-            ser.timeout = 0.5    
+            ser.timeout = 0.005    
 
 
 # Receive an image from the camera by writing to the serial port
